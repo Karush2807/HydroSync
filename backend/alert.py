@@ -38,9 +38,12 @@ Be prepared and stay safe!'''
     else:
         print("No alert sent. Flood probability is below the warning threshold.")
 
-if __name__ == "__main__":
-    flood_probability = 0.75
-    recipient_phone_number = "918851624048@c.us" 
+
+
+
+# if __name__ == "__main__":
+#     flood_probability = 0.75
+#     recipient_phone_number = "918851624048@c.us" 
     
-    # Send alert based on the prediction result
-    send_whatsapp_alert(flood_probability, recipient_phone_number)
+#     # Send alert based on the prediction result
+#     send_whatsapp_alert(flood_probability, recipient_phone_number)
