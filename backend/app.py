@@ -1,4 +1,3 @@
-# backend/app.py
 from flask import Flask, request, jsonify
 import joblib
 import torch
@@ -6,16 +5,18 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from twilio.rest import Client
 from dotenv import load_dotenv
 import os
+from whatsapp_api_client_python import API
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 
-# ----- PyTorch Model Definition -----
+greenAPI = API.GreenAPI("7105197606", "24f0fd5b279c45a28f1e2d38f8d1ec0dbcf26a571ea4482896")
+
+# PyTorch Model Definition
 class FloodPred(nn.Module):
     def __init__(self, input_size=20):
         super(FloodPred, self).__init__()
@@ -32,41 +33,33 @@ class FloodPred(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
-
-# ----- Model Loading with Security -----
+# Model Loading
 MODEL_PATHS = {
     'xgboost': 'models/floodXgBoostV1.pkl',
     'pytorch': 'models/floodNN.pt'
 }
 
 def load_models():
-    """Safely load ML models with error handling"""
     try:
-        # Load XGBoost model
         xgboost_model = joblib.load(MODEL_PATHS['xgboost'])
-        
-        # Load PyTorch model
         pytorch_model = FloodPred(input_size=20)
         pytorch_model.load_state_dict(
             torch.load(MODEL_PATHS['pytorch'], map_location=torch.device('cpu'))
         )
         pytorch_model.eval()
-        
         return xgboost_model, pytorch_model
-
     except FileNotFoundError as e:
         raise RuntimeError(f"Model file not found: {str(e)}")
     except Exception as e:
         raise RuntimeError(f"Error loading models: {str(e)}")
 
-# Initialize models
 try:
     xgboost_model, pytorch_model = load_models()
 except RuntimeError as e:
     app.logger.error(str(e))
     exit(1)
 
-#Alert System Configuration 
+# Alert System
 class DynamicThresholdCalculator:
     def __init__(self, data_path='dataset/train_data.csv'):
         try:
@@ -77,72 +70,69 @@ class DynamicThresholdCalculator:
             self.data = pd.DataFrame()
 
     def calculate_threshold(self):
-    
         if self.data.empty:
-            return 0.45  # Lower fallback threshold
-    
-        time_window = datetime.now() - timedelta(hours=6)  # Shorter window
+            return 0.45
+        time_window = datetime.now() - timedelta(hours=6)
         recent_data = self.data[self.data['timestamp'] > time_window]
-    
         if len(recent_data) > 50:
             return recent_data['risk_score'].quantile(0.75)
         return 0.5
 
-# Initialize systems
 threshold_calculator = DynamicThresholdCalculator()
-twilio_client = Client(os.getenv('TWILIO_ACCOUNT_SID'), 
-                      os.getenv('TWILIO_AUTH_TOKEN'))
 
-# ----- API Endpoints -----
+def send_whatsapp_alert(result, phone_number):
+    warning_threshold = 0.56  
+    evacuation_threshold = 0.70
+    if result >= evacuation_threshold:
+        message = '''🚨 URGENT EVACUATION ALERT
+⚠️ FLOOD RISK IS EXTREMELY HIGH!
+
+Your area is at severe risk of flooding. Evacuate immediately to higher ground or a safe location.
+
+1️⃣ Carry essentials (ID, cash, meds, food, water).
+2️⃣ Turn off electricity and gas before leaving.
+3️⃣ Avoid floodwaters—stay safe from strong currents.
+
+DO NOT DELAY! ACT NOW!
+For help, contact local authorities. Stay informed and stay safe!'''
+        response = greenAPI.sending.sendMessage(phone_number, message)
+        print(f"Evacuation Alert Sent: {response.data}")
+    elif result >= warning_threshold:
+        message = '''⚠️ FLOOD WARNING
+There is a significant chance of flooding in your area. Stay alert and take these precautions:
+
+1️⃣ Move to higher ground if you are in a low-lying area.
+2️⃣ Prepare an emergency kit with essentials (ID, cash, meds, food, water).
+3️⃣ Avoid walking or driving through floodwaters—stay safe from currents and debris.
+4️⃣ Stay updated via official channels for further instructions.
+
+Be prepared and stay safe!'''
+        response = greenAPI.sending.sendMessage(phone_number, message)
+        print(f"Flood Warning Sent: {response.data}")
+    else:
+        print("No alert sent. Flood probability is below the warning threshold.")
+
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
         data = request.json
         features = data.get('features', [])
-        phone_number = data.get('phone', '')
+        phone_number = '919311570728@c.us'
         location = data.get('location', 'Unknown')
-        
         if len(features) != 20:
             return jsonify({'error': 'Exactly 20 features required'}), 400
-
-        # Static threshold configuration
-        STATIC_THRESHOLD = 0.65  # 65% risk threshold
-        
-        # Model predictions
+        STATIC_THRESHOLD = 0.65
         xgb_pred = xgboost_model.predict(np.array([features]))[0]
         with torch.no_grad():
             torch_pred = pytorch_model(torch.tensor([features], dtype=torch.float32)).item()
-            
         combined_risk = (xgb_pred * 0.7 + torch_pred * 0.3)
-        
-        # Determine alert status
         alert_status = "High Risk" if combined_risk > STATIC_THRESHOLD else "Low Risk"
-        
-        # SMS Alert Logic
-        sms_sent = False
-        if alert_status == "High Risk" and phone_number:
-            try:
-                message = f"""🚨 FLOOD ALERT 🚨
-Location: {location}
-Risk Level: {combined_risk:.0%}
-Immediate Action Required!"""
-                
-                twilio_client.messages.create(
-                    body=message,
-                    from_=os.getenv('TWILIO_PHONE'),
-                    to=phone_number
-                )
-                sms_sent = True
-            except Exception as e:
-                app.logger.error(f"SMS Failed: {str(e)}")
-
+        send_whatsapp_alert(combined_risk, phone_number)
         return jsonify({
             'risk': combined_risk,
             'threshold': STATIC_THRESHOLD,
-            'alert': alert_status,
-            'sms_sent': sms_sent
+            'alert': alert_status
         })
-
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
